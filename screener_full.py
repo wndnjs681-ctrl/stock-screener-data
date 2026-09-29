@@ -262,7 +262,16 @@ def fetch_history(sym,start):
  return None
 
 def pack_series(df):
- d=df.tail(250); close=np.rint(d.Close).astype('int64').tolist(); vol=np.rint(d.Volume.fillna(0)/1000).astype('int64').tolist()
+ d=df.tail(250).copy()
+ for c in ('Open','High','Low','Close','Volume'):
+  d[c]=pd.to_numeric(d[c],errors='coerce')
+ d[['Open','High','Low','Close']]=d[['Open','High','Low','Close']].replace([np.inf,-np.inf],np.nan)
+ d['Close']=d['Close'].ffill().bfill()
+ for c in ('Open','High','Low'):
+  d[c]=d[c].fillna(d['Close'])
+ d['Volume']=d['Volume'].replace([np.inf,-np.inf],np.nan).fillna(0)
+ if d['Close'].isna().any(): raise ValueError('series has no finite Close values')
+ close=np.rint(d.Close).astype('int64').tolist(); vol=np.rint(d.Volume/1000).astype('int64').tolist()
  tail=d.tail(150); tc=np.rint(tail.Close).astype('int64'); delta=lambda x: (np.rint(x).astype('int64')-tc).tolist()
  return {'c':close,'v':vol,'n':len(d)-len(tail),'o':delta(tail.Open),'h':delta(tail.High),'l':delta(tail.Low)}
 
@@ -278,6 +287,11 @@ def build_us():
  for idx,sym in enumerate(symbols):
   d=fetch_history(sym,start)
   if d is None: continue
+  d=d.copy()
+  for c in ('Open','High','Low','Close','Volume'):
+   if c in d: d[c]=pd.to_numeric(d[c],errors='coerce')
+  d=d.replace([np.inf,-np.inf],np.nan).dropna(subset=['Close'])
+  if len(d)<25: continue
   dates.append(pd.Timestamp(d.index[-1])); m=calc(d)
   if (m.get('amount') or 0) < (100_000_000 if region=='kr' else 1_000_000): continue
   rec=universe.loc[universe[symcol].astype(str)==sym].iloc[0].to_dict(); name=_safe_str(rec.get('Name') or rec.get('Security') or sym); m.update({'symbol':sym,'name':name})
@@ -294,7 +308,7 @@ def build_us():
    per_s = d.Close.astype(float).tail(252) / trail_eps
    pmin,pmax = per_s.min(),per_s.max(); m['per_band_pos']=(m['per']-pmin)/(pmax-pmin)*100 if m.get('per') is not None and pmax>pmin else 50
   else: m['per_band_pos']=None
-  rows.append(m); series[sym]=pack_series(d); calendar_dates.update(pd.Timestamp(x).strftime('%Y-%m-%d') for x in d.tail(250).index); calendar_dates.update(pd.Timestamp(x).strftime('%Y-%m-%d') for x in d.tail(250).index)
+  rows.append(m); series[sym]=pack_series(d); calendar_dates.update(pd.Timestamp(x).strftime('%Y-%m-%d') for x in d.tail(250).index)
   if idx%100==0: print(region,idx,'/',len(symbols),'kept',len(rows))
  # sector relative valuation
  rdf=pd.DataFrame(rows)
@@ -312,6 +326,7 @@ def self_test():
  x=calc(d); assert x['is_hi20'] is True; assert x['sma5'] > x['sma20'] > x['sma60'] > x['sma120']; assert round(rsi(pd.Series(range(1,40))).iloc[-1])==100
  down=pd.Series(range(40,1,-1)); assert round(rsi(down).iloc[-1])==0
  assert _safe_str(np.nan)=='' and _safe_str(None)=='' and _safe_str(1.2)=='1.2'; assert len(pack_series(d)['c'])==250 and 'd' not in pack_series(d)
+ bad=d.copy(); bad.iloc[-1,bad.columns.get_loc('Open')]=np.nan; bad.iloc[-2,bad.columns.get_loc('High')]=np.inf; bad.iloc[-3,bad.columns.get_loc('Volume')]=np.nan; assert len(pack_series(bad)['c'])==250
  print('self_test: OK')
 
 if __name__=='__main__':
