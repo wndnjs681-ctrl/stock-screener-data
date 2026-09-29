@@ -120,31 +120,56 @@ def normalize_krx(z):
   'Open':z['TDD_OPNPRC'].map(_numstr),'High':z['TDD_HGPRC'].map(_numstr),'Low':z['TDD_LWPRC'].map(_numstr),
   'Close':z['TDD_CLSPRC'].map(_numstr),'Volume':z['ACC_TRDVOL'].map(_numstr),
   'Amount':z['ACC_TRDVAL'].map(_numstr),'MarketCap':z['MKTCAP'].map(_numstr)})
+ for c in ['Open','High','Low','Close','Volume','Amount','MarketCap']:
+  out[c]=pd.to_numeric(out[c],errors='coerce')
  return out.dropna(subset=['Date','Code','Close'])
 
-def update_krx_cache(bootstrap_days=430):
+def _save_krx_cache(cache, new_frames=None):
+ frames=[cache] if isinstance(cache,pd.DataFrame) and len(cache) else []
+ if new_frames: frames.extend([x for x in new_frames if isinstance(x,pd.DataFrame) and len(x)])
+ if not frames: return pd.DataFrame()
+ out=pd.concat(frames,ignore_index=True)
+ out['Date']=pd.to_datetime(out['Date'],errors='coerce')
+ out['Code']=out['Code'].astype(str).str.replace(r'\.0$','',regex=True).str.zfill(6)
+ for c in ['Open','High','Low','Close','Volume','Amount','MarketCap']:
+  if c in out: out[c]=pd.to_numeric(out[c],errors='coerce')
+ out=out.dropna(subset=['Date','Code','Close']).drop_duplicates(['Date','Code'],keep='last').sort_values(['Date','Code'])
+ KRX_CACHE.parent.mkdir(parents=True,exist_ok=True)
+ tmp=KRX_CACHE.with_suffix('.tmp.gz')
+ out.to_csv(tmp,index=False,compression='gzip')
+ tmp.replace(KRX_CACHE)
+ return out
+
+def update_krx_cache(bootstrap_days=430, checkpoint_every=10):
  KRX_CACHE.parent.mkdir(parents=True,exist_ok=True)
  if KRX_CACHE.exists():
   cache=pd.read_csv(KRX_CACHE,compression='gzip',dtype={'Code':str},parse_dates=['Date'])
+  cache=_save_krx_cache(cache)
   start=cache.Date.max().normalize()+pd.Timedelta(days=1) if len(cache) else pd.Timestamp.today().normalize()-pd.Timedelta(days=bootstrap_days)
  else:
   cache=pd.DataFrame(); start=pd.Timestamp.today().normalize()-pd.Timedelta(days=bootstrap_days)
  end=pd.Timestamp.today().normalize(); days=pd.date_range(start,end,freq='B')
  print(f'KRX cache {len(cache):,} rows; checking {len(days)} weekdays')
- new=[]
- for i,day in enumerate(days,1):
-  try:
-   z=normalize_krx(krx_get_day(day))
-   if len(z): new.append(z); print(f'KRX {day.date()} {len(z):,} rows ({i}/{len(days)})')
-  except Exception as e:
-   msg=str(e)
-   if any(x in msg for x in ('HTTP 401','HTTP 403','Unauthorized','KRX_API_KEY')): raise
-   print('KRX warning:',msg)
-  time.sleep(.06)
- if new:
-  cache=pd.concat([cache,*new],ignore_index=True); cache['Code']=cache.Code.astype(str).str.zfill(6)
-  cache=cache.drop_duplicates(['Date','Code'],keep='last').sort_values(['Date','Code'])
-  cache.to_csv(KRX_CACHE,index=False,compression='gzip')
+ pending=[]; success_days=0
+ try:
+  for i,day in enumerate(days,1):
+   try:
+    z=normalize_krx(krx_get_day(day))
+    if len(z):
+     pending.append(z); success_days+=1
+     print(f'KRX {day.date()} {len(z):,} rows ({i}/{len(days)})')
+     if success_days % checkpoint_every == 0:
+      cache=_save_krx_cache(cache,pending); pending=[]
+      print(f'KRX checkpoint saved: {len(cache):,} rows through {cache.Date.max().date()}')
+   except Exception as e:
+    msg=str(e)
+    if any(x in msg for x in ('HTTP 401','HTTP 403','Unauthorized','KRX_API_KEY')): raise
+    print('KRX warning:',msg)
+ finally:
+  # Preserve every successful API response even if a later calculation/run fails.
+  if pending:
+   cache=_save_krx_cache(cache,pending)
+   print(f'KRX final checkpoint saved: {len(cache):,} rows through {cache.Date.max().date()}')
  if cache.empty: raise RuntimeError('KRX cache is empty; check API approvals/key')
  return cache
 
@@ -156,7 +181,10 @@ def build_kr():
  for _,rec in cur.iterrows():
   sym=str(rec.Code).zfill(6); hist=cache.loc[cache.Code.astype(str).str.zfill(6)==sym].sort_values('Date').tail(320)
   if len(hist)<25: continue
-  d=hist.set_index('Date')[['Open','High','Low','Close','Volume']]; m=calc(d)
+  d=hist.set_index('Date')[['Open','High','Low','Close','Volume']].copy()
+  d=d.apply(pd.to_numeric,errors='coerce').dropna(subset=['Open','High','Low','Close','Volume'])
+  if len(d)<25: continue
+  m=calc(d)
   m['amount']=_finite(rec.Amount); m['market_cap']=_finite(rec.MarketCap)
   if (m.get('amount') or 0)<100_000_000: continue
   meta=sector_map.get(sym,{}) if isinstance(sector_map,dict) else {}; con=consensus.get(sym,{}) if isinstance(consensus,dict) else {}
