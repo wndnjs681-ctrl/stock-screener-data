@@ -1,25 +1,45 @@
 name: Build screener data
+
 on:
   workflow_dispatch:
     inputs:
       region:
-        description: kr, us, or all
-        required: false
+        description: Region to build
+        required: true
         default: all
+        type: choice
+        options:
+          - kr
+          - us
+          - all
   schedule:
-    - cron: '40 7 * * 1-5'   # 16:40 KST, KR close
-    - cron: '40 22 * * 1-5'  # 22:40 UTC, US run
+    # 16:40 KST = 07:40 UTC, weekdays
+    - cron: '40 7 * * 1-5'
+    # 22:40 UTC, weekdays
+    - cron: '40 22 * * 1-5'
+
 permissions:
   contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 330
+    timeout-minutes: 90
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
-        with: {python-version: '3.12'}
-      - run: pip install -U finance-datareader pandas numpy requests lxml
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -U finance-datareader pandas numpy requests lxml
+
+      - name: Self test
+        run: python screener_full.py --self-test
+
       - name: Select region
         id: sel
         shell: bash
@@ -31,25 +51,64 @@ jobs:
           else
             echo "region=us" >> "$GITHUB_OUTPUT"
           fi
-      - run: python screener_full.py --self-test
+
+      - name: Restore KRX history cache
+        if: steps.sel.outputs.region == 'kr' || steps.sel.outputs.region == 'all'
+        uses: actions/cache/restore@v4
+        with:
+          path: cache/kr_ohlcv.csv.gz
+          key: krx-history-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            krx-history-${{ runner.os }}-
+
       - name: Build market data
         env:
           KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
         run: python screener_full.py --region "${{ steps.sel.outputs.region }}"
+
+      # Runs even when Build market data fails, so successfully downloaded
+      # KRX history survives the failed workflow.
+      - name: Save KRX history cache
+        if: always() && (steps.sel.outputs.region == 'kr' || steps.sel.outputs.region == 'all')
+        uses: actions/cache/save@v4
+        with:
+          path: cache/kr_ohlcv.csv.gz
+          key: krx-history-${{ runner.os }}-${{ github.run_id }}
+
       - name: Validate outputs
+        if: success()
+        shell: bash
         run: |
           python - <<'PY'
-          import json,glob,os
-          for p in glob.glob('output/universe_*.json')+glob.glob('output/series_*.json'):
-              x=json.load(open(p)); assert x.get('date'), p; print(p, os.path.getsize(p), x['date'])
+          import json, pathlib
+          region="${{ steps.sel.outputs.region }}"
+          regions=['kr','us'] if region=='all' else [region]
+          for r in regions:
+              u=pathlib.Path(f'output/universe_{r}.json')
+              s=pathlib.Path(f'output/series_{r}.json')
+              assert u.exists() and u.stat().st_size>100, u
+              assert s.exists() and s.stat().st_size>100, s
+              uj=json.loads(u.read_text(encoding='utf-8'))
+              sj=json.loads(s.read_text(encoding='utf-8'))
+              assert uj.get('date'), f'{r}: missing universe date'
+              assert uj.get('schema'), f'{r}: missing schema'
+              assert isinstance(uj.get('rows'),list) and len(uj['rows'])>0, f'{r}: empty rows'
+              assert sj.get('date'), f'{r}: missing series date'
+              assert isinstance(sj.get('series'),dict) and len(sj['series'])>0, f'{r}: empty series'
+              print(r, uj['date'], len(uj['rows']), len(sj['series']))
           PY
-      - name: Commit generated JSON
+
+      - name: Commit generated JSON and durable KRX cache
+        if: success()
+        shell: bash
         run: |
-          git config user.name github-actions[bot]
-          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
-          mkdir -p cache
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add output/*.json
-          [ -f cache/kr_ohlcv.csv.gz ] && git add cache/kr_ohlcv.csv.gz || true
-          git diff --cached --quiet && exit 0
-          git commit -m "chore: update screener data"
-          git push
+          if [ -f cache/kr_ohlcv.csv.gz ]; then git add -f cache/kr_ohlcv.csv.gz; fi
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "data: refresh screener"
+            git push
+          fi
