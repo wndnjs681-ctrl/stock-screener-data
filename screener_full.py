@@ -208,7 +208,7 @@ def build_kr():
  date=max(dates).strftime('%Y-%m-%d') if dates else latest.strftime('%Y-%m-%d')
  payload={'region':'kr','date':date,'run_at':datetime.now(timezone.utc).isoformat(),'schema':SCHEMA,'rows':rows}
  (OUT/'universe_kr.json').write_text(json.dumps(payload,ensure_ascii=False,separators=(',',':')),encoding='utf-8')
- (OUT/'series_kr.json').write_text(json.dumps({'region':'kr','date':date,'series':series},ensure_ascii=False,separators=(',',':')),encoding='utf-8')
+ (OUT/'series_kr.json').write_text(json.dumps({'region':'kr','date':date,'dates':series_calendar(cache.set_index('Date')),'series':series},ensure_ascii=False,separators=(',',':')),encoding='utf-8')
  print('wrote kr',len(rows),'date',date)
 
 def yahoo_quotes(symbols):
@@ -262,13 +262,16 @@ def fetch_history(sym,start):
  return None
 
 def pack_series(df):
- d=df.tail(250); close=np.rint(d.Close).astype('int64').tolist(); vol=np.rint(d.Volume.fillna(0)/1000).astype('int64').tolist(); dates=[pd.Timestamp(x).strftime('%Y-%m-%d') for x in d.index]
- tail=d.tail(150); tc=np.rint(tail.Close).astype('int64'); delta=lambda s: (np.rint(s).astype('int64')-tc).tolist()
- return {'d':dates,'c':close,'v':vol,'n':len(d)-len(tail),'o':delta(tail.Open),'h':delta(tail.High),'l':delta(tail.Low)}
+ d=df.tail(250); close=np.rint(d.Close).astype('int64').tolist(); vol=np.rint(d.Volume.fillna(0)/1000).astype('int64').tolist()
+ tail=d.tail(150); tc=np.rint(tail.Close).astype('int64'); delta=lambda x: (np.rint(x).astype('int64')-tc).tolist()
+ return {'c':close,'v':vol,'n':len(d)-len(tail),'o':delta(tail.Open),'h':delta(tail.High),'l':delta(tail.Low)}
+
+def series_calendar(df):
+ return [pd.Timestamp(x).strftime('%Y-%m-%d') for x in sorted(pd.Index(df.index).unique())[-250:]]
 
 def build_us():
  region='us'
- start=(pd.Timestamp.today()-pd.Timedelta(days=430)).strftime('%Y-%m-%d'); rows=[]; series={}; dates=[]
+ start=(pd.Timestamp.today()-pd.Timedelta(days=430)).strftime('%Y-%m-%d'); rows=[]; series={}; dates=[]; calendar_dates=set()
  sector_map=load_json(OUT/'sector_map_kr.json') if region=='kr' else {}; consensus=load_json(OUT/'consensus_kr.json') if region=='kr' else {}
  universe=kr_symbols() if region=='kr' else us_symbols(); symcol='Code' if region=='kr' else 'Symbol'; symbols=[_safe_str(x) for x in universe[symcol].tolist() if _safe_str(x)]
  yq=yahoo_quotes(symbols) if region=='us' else {}
@@ -291,7 +294,7 @@ def build_us():
    per_s = d.Close.astype(float).tail(252) / trail_eps
    pmin,pmax = per_s.min(),per_s.max(); m['per_band_pos']=(m['per']-pmin)/(pmax-pmin)*100 if m.get('per') is not None and pmax>pmin else 50
   else: m['per_band_pos']=None
-  rows.append(m); series[sym]=pack_series(d)
+  rows.append(m); series[sym]=pack_series(d); calendar_dates.update(pd.Timestamp(x).strftime('%Y-%m-%d') for x in d.tail(250).index); calendar_dates.update(pd.Timestamp(x).strftime('%Y-%m-%d') for x in d.tail(250).index)
   if idx%100==0: print(region,idx,'/',len(symbols),'kept',len(rows))
  # sector relative valuation
  rdf=pd.DataFrame(rows)
@@ -301,14 +304,14 @@ def build_us():
    for r in rows:
     mm=_finite(med.get(r['sector'])); vv=_finite(r.get(field)); r[outkey]=vv/mm if vv is not None and mm else None
  date=max(dates).strftime('%Y-%m-%d') if dates else None; payload={'region':region,'date':date,'run_at':datetime.now(timezone.utc).isoformat(),'schema':SCHEMA,'rows':rows}
- (OUT/f'universe_{region}.json').write_text(json.dumps(payload,ensure_ascii=False,separators=(',',':')),encoding='utf-8'); (OUT/f'series_{region}.json').write_text(json.dumps({'region':region,'date':date,'series':series},ensure_ascii=False,separators=(',',':')),encoding='utf-8')
+ (OUT/f'universe_{region}.json').write_text(json.dumps(payload,ensure_ascii=False,separators=(',',':')),encoding='utf-8'); (OUT/f'series_{region}.json').write_text(json.dumps({'region':region,'date':date,'dates':sorted(calendar_dates)[-250:],'series':series},ensure_ascii=False,separators=(',',':')),encoding='utf-8')
  print('wrote',region,len(rows),'date',date)
 
 def self_test():
  idx=pd.date_range('2025-01-01',periods=300,freq='B'); c=pd.Series(np.linspace(100,200,300),index=idx); d=pd.DataFrame({'Open':c-1,'High':c+1,'Low':c-2,'Close':c,'Volume':1000},index=idx); d.iloc[-1,d.columns.get_loc('High')]=999
  x=calc(d); assert x['is_hi20'] is True; assert x['sma5'] > x['sma20'] > x['sma60'] > x['sma120']; assert round(rsi(pd.Series(range(1,40))).iloc[-1])==100
  down=pd.Series(range(40,1,-1)); assert round(rsi(down).iloc[-1])==0
- assert _safe_str(np.nan)=='' and _safe_str(None)=='' and _safe_str(1.2)=='1.2'; assert len(pack_series(d)['c'])==250
+ assert _safe_str(np.nan)=='' and _safe_str(None)=='' and _safe_str(1.2)=='1.2'; assert len(pack_series(d)['c'])==250 and 'd' not in pack_series(d)
  print('self_test: OK')
 
 if __name__=='__main__':
