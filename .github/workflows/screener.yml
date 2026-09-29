@@ -1,0 +1,55 @@
+name: Build screener data
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: kr, us, or all
+        required: false
+        default: all
+  schedule:
+    - cron: '40 7 * * 1-5'   # 16:40 KST, KR close
+    - cron: '40 22 * * 1-5'  # 22:40 UTC, US run
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: {python-version: '3.12'}
+      - run: pip install -U finance-datareader pandas numpy requests lxml
+      - name: Select region
+        id: sel
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "region=${{ inputs.region }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.schedule }}" = "40 7 * * 1-5" ]; then
+            echo "region=kr" >> "$GITHUB_OUTPUT"
+          else
+            echo "region=us" >> "$GITHUB_OUTPUT"
+          fi
+      - run: python screener_full.py --self-test
+      - name: Build market data
+        env:
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+        run: python screener_full.py --region "${{ steps.sel.outputs.region }}"
+      - name: Validate outputs
+        run: |
+          python - <<'PY'
+          import json,glob,os
+          for p in glob.glob('output/universe_*.json')+glob.glob('output/series_*.json'):
+              x=json.load(open(p)); assert x.get('date'), p; print(p, os.path.getsize(p), x['date'])
+          PY
+      - name: Commit generated JSON
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          mkdir -p cache
+          git add output/*.json
+          [ -f cache/kr_ohlcv.csv.gz ] && git add cache/kr_ohlcv.csv.gz || true
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: update screener data"
+          git push
