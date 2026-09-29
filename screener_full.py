@@ -202,7 +202,7 @@ def build_kr():
  rdf=pd.DataFrame(rows)
  if len(rdf):
   for fld,outkey in [('per','sector_per_rel'),('pbr','sector_pbr_rel')]:
-   med=rdf.groupby('sector')[fld].median(numeric_only=True).to_dict()
+   med=rdf.assign(_v=pd.to_numeric(rdf[fld],errors='coerce')).groupby('sector')['_v'].median().to_dict()
    for r in rows:
     mm=_finite(med.get(r['sector'])); vv=_finite(r.get(fld)); r[outkey]=vv/mm if vv is not None and mm else None
  date=max(dates).strftime('%Y-%m-%d') if dates else latest.strftime('%Y-%m-%d')
@@ -297,7 +297,7 @@ def build_us():
  rdf=pd.DataFrame(rows)
  if len(rdf):
   for field,outkey in [('per','sector_per_rel'),('pbr','sector_pbr_rel')]:
-   med=rdf.groupby('sector')[field].median(numeric_only=True).to_dict()
+   med=rdf.assign(_v=pd.to_numeric(rdf[field],errors='coerce')).groupby('sector')['_v'].median().to_dict()
    for r in rows:
     mm=_finite(med.get(r['sector'])); vv=_finite(r.get(field)); r[outkey]=vv/mm if vv is not None and mm else None
  date=max(dates).strftime('%Y-%m-%d') if dates else None; payload={'region':region,'date':date,'run_at':datetime.now(timezone.utc).isoformat(),'schema':SCHEMA,'rows':rows}
